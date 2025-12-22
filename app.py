@@ -23,7 +23,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-INFO_API_URL = "https://fffinfo.tsunstudio.pw/get"
+INFO_API_URL = "https://ff-api-anis.onrender.com/check"
 FONT_FILE = "arial_unicode_bold.otf"
 FONT_CHEROKEE = "NotoSansCherokee.ttf"
 
