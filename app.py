@@ -2,19 +2,12 @@ import io
 import os
 import asyncio
 import httpx
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageDraw, ImageFont
 from concurrent.futures import ThreadPoolExecutor
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
-    await client.aclose()
-    process_pool.shutdown()
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,9 +16,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-INFO_API_URL = "https://ff-api-anis.onrender.com/check"
-FONT_FILE = "arial_unicode_bold.otf"
-FONT_CHEROKEE = "NotoSansCherokee.ttf"
+INFO_API_URL = "Your Info Api"
+FONT_FILE = "NotoSans-Bold.ttf"
 
 client = httpx.AsyncClient(
     headers={"User-Agent": "Mozilla/5.0"},
@@ -35,9 +27,9 @@ client = httpx.AsyncClient(
 
 process_pool = ThreadPoolExecutor(max_workers=4)
 
-def load_unicode_font(size, font_file=FONT_FILE):
+def load_unicode_font(size):
     try:
-        font_path = os.path.join(os.path.dirname(__file__), font_file)
+        font_path = os.path.join(os.path.dirname(__file__), FONT_FILE)
         if os.path.exists(font_path):
             return ImageFont.truetype(font_path, size)
         return ImageFont.load_default()
@@ -113,38 +105,21 @@ def process_banner_image(data, avatar_bytes, banner_bytes, pin_bytes):
     draw = ImageDraw.Draw(combined)
     
     font_large = load_unicode_font(125) 
-    font_large_cherokee = load_unicode_font(125, FONT_CHEROKEE)
     font_small = load_unicode_font(95) 
-    font_small_cherokee = load_unicode_font(95, FONT_CHEROKEE)
     font_level = load_unicode_font(50)
 
     text_x = TARGET_HEIGHT + 40 
     text_y = 40 
     
-    def is_cherokee(char):
-        code = ord(char)
-        return (0x13A0 <= code <= 0x13FF) or (0xAB70 <= code <= 0xABBF)
-
-    def draw_text_with_stroke(x, y, text, font_main, font_fallback, size):
-        current_x = x
-        for char in text:
-            font = font_fallback if is_cherokee(char) else font_main
-            
-            # Draw stroke
-            for dx in range(-size, size + 1):
-                for dy in range(-size, size + 1):
-                    draw.text((current_x + dx, y + dy), char, font=font, fill=stroke_col)
-            
-            # Draw text
-            draw.text((current_x, y), char, font=font, fill=text_col)
-            
-            # Advance cursor
-            char_width = font.getlength(char)
-            current_x += char_width
+    def draw_text_with_stroke(x, y, text, font, size):
+        for dx in range(-size, size + 1):
+            for dy in range(-size, size + 1):
+                draw.text((x + dx, y + dy), text, font=font, fill=stroke_col)
+        draw.text((x, y), text, font=font, fill=text_col)
 
     stroke_col, text_col = "black", "white"
-    draw_text_with_stroke(text_x + 25, text_y, name, font_large, font_large_cherokee, 4)
-    draw_text_with_stroke(text_x + 25, text_y + 200, guild, font_small, font_small_cherokee, 3)
+    draw_text_with_stroke(text_x + 25, text_y, name, font_large, 4)
+    draw_text_with_stroke(text_x + 25, text_y + 200, guild, font_small, 3)
 
     if pin_img and pin_img.size != (100, 100):
         pin_size = 130 
@@ -173,11 +148,11 @@ def process_banner_image(data, avatar_bytes, banner_bytes, pin_bytes):
 @app.get("/")
 async def home():
     return {"message": "⚡ Ultra Fast Banner API Running",
-           "Fix By": "TSun-FreeFire",
-           "Telegram": "@saeedxdie",
+           "Made By": "Flexbase",
+           "Telegram": "@Flexbasei",
            "Your Info Api": INFO_API_URL,
            "Api Endpoint": "/profile?uid={uid}",
-           "Note": "Join To @Flexbasei For More 💝"
+           "Note": "Join To Us For More 💝"
     }
 
 @app.get("/profile")
@@ -192,18 +167,15 @@ async def get_banner(uid: str):
             raise HTTPException(status_code=502, detail="Info API Error")
             
         data = resp.json()
+        acc = data.get("AccountInfo", data)
+        guild = data.get("GuildInfo", {})
         
-        account_info = data.get("AccountInfo", {})
-        equipped_items = data.get("EquippedItemsInfo", {})
-        profile_info = data.get("AccountProfileInfo", {})
-        guild_info = data.get("GuildInfo", {})
+        if not acc: raise HTTPException(status_code=404, detail="Not Found")
         
-        if not account_info: raise HTTPException(status_code=404, detail="Not Found")
+        avatar_task = fetch_image_bytes(acc.get("AccountAvatarId") or acc.get("headPic"))
+        banner_task = fetch_image_bytes(acc.get("AccountBannerId") or acc.get("bannerId"))
         
-        avatar_task = fetch_image_bytes(equipped_items.get("EquippedAvatarId"))
-        banner_task = fetch_image_bytes(equipped_items.get("EquippedBannerId"))
-        
-        pin_id = profile_info.get("Title")
+        pin_id = acc.get("pinId") or acc.get("title")
         pin_task = fetch_image_bytes(pin_id) if (pin_id and str(pin_id) != "0") else asyncio.sleep(0)
 
         results = await asyncio.gather(avatar_task, banner_task, pin_task)
@@ -213,9 +185,9 @@ async def get_banner(uid: str):
 
         loop = asyncio.get_event_loop()
         banner_data = {
-            "AccountLevel": account_info.get("AccountLevel", "0"),
-            "AccountName": account_info.get("AccountName", "Unknown"),
-            "GuildName": guild_info.get("GuildName", "")
+            "AccountLevel": acc.get("AccountLevel") or acc.get("level"),
+            "AccountName": acc.get("AccountName") or acc.get("nickname"),
+            "GuildName": guild.get("GuildName") or guild.get("clanName") or ""
         }
         
         img_io = await loop.run_in_executor(
@@ -230,6 +202,11 @@ async def get_banner(uid: str):
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    await client.aclose()
+    process_pool.shutdown()
+
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=5000)
+    uvicorn.run(app, host="0.0.0.0", port=5000)
