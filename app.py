@@ -6,8 +6,20 @@ from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageDraw, ImageFont
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+# --- إعدادات lifespan (الطريقة الحديثة لإدارة دورة حياة التطبيق) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # الكود الذي يتم تشغيله عند بدء التطبيق
+    print("Application startup complete.")
+    yield
+    # الكود الذي يتم تشغيله عند إيقاف التطبيق
+    print("Application shutdown.")
+    await client.aclose()
+    process_pool.shutdown()
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,7 +28,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-INFO_API_URL = "Your Info Api"
+# تم تحديث الرابط هنا
+INFO_API_URL = "https://ff-api-anis.onrender.com/check"
 FONT_FILE = "NotoSans-Bold.ttf"
 
 client = httpx.AsyncClient(
@@ -42,8 +55,9 @@ async def fetch_image_bytes(item_id):
 
     item_id = str(item_id)
     
+    urls_to_try = []
     for repo_num in range(1, 7):
-        if repo_num == 1: 
+        if repo_num == 1:
             batch_start, batch_end = 1, 7
         else:
             batch_start = (repo_num - 1) * 6 + 1
@@ -52,25 +66,32 @@ async def fetch_image_bytes(item_id):
         for batch_num in range(batch_start, batch_end):
             batch_str = f"{batch_num:02d}"
             url = f"https://raw.githubusercontent.com/djdndbdjfi/free-fire-items-{repo_num}/main/items/batch-{batch_str}/{item_id}.png"
+            urls_to_try.append(url)
             
-            try:
-                resp = await client.head(url)
-                if resp.status_code == 200:
-                    img_resp = await client.get(url)
+    for url in urls_to_try:
+        try:
+            resp = await client.head(url, timeout=5.0)
+            if resp.status_code == 200:
+                img_resp = await client.get(url, timeout=10.0)
+                if img_resp.status_code == 200:
                     return img_resp.content
-            except:
-                continue
+        except Exception as e:
+            print(f"Failed to fetch {url}: {e}")
+            continue
     return None
 
-def bytes_to_image(img_bytes):
+def bytes_to_image(img_bytes, default_size=(100, 100), default_color=(50, 50, 50, 255)):
     if img_bytes:
-        return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-    return Image.new('RGBA', (100, 100), (0, 0, 0, 0))
+        try:
+            return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+        except Exception as e:
+            print(f"Error converting bytes to image: {e}")
+    return Image.new('RGBA', default_size, default_color)
 
 def process_banner_image(data, avatar_bytes, banner_bytes, pin_bytes):
-    avatar_img = bytes_to_image(avatar_bytes)
-    banner_img = bytes_to_image(banner_bytes)
-    pin_img = bytes_to_image(pin_bytes)
+    avatar_img = bytes_to_image(avatar_bytes, default_size=(400, 400), default_color=(80, 80, 80, 255))
+    banner_img = bytes_to_image(banner_bytes, default_size=(800, 400), default_color=(30, 30, 30, 255))
+    pin_img = bytes_to_image(pin_bytes, default_size=(130, 130), default_color=(0,0,0,0))
 
     level = str(data.get("AccountLevel", "0"))
     name = data.get("AccountName", "Unknown")
@@ -104,7 +125,7 @@ def process_banner_image(data, avatar_bytes, banner_bytes, pin_bytes):
     
     draw = ImageDraw.Draw(combined)
     
-    font_large = load_unicode_font(125) 
+    font_large = load_unicode_font(135) 
     font_small = load_unicode_font(95) 
     font_level = load_unicode_font(50)
 
@@ -114,14 +135,29 @@ def process_banner_image(data, avatar_bytes, banner_bytes, pin_bytes):
     def draw_text_with_stroke(x, y, text, font, size):
         for dx in range(-size, size + 1):
             for dy in range(-size, size + 1):
-                draw.text((x + dx, y + dy), text, font=font, fill=stroke_col)
-        draw.text((x, y), text, font=font, fill=text_col)
+                if abs(dx) == size or abs(dy) == size:
+                    draw.text((x + dx, y + dy), text, font=font, fill="black")
+        draw.text((x, y), text, font=font, fill="white")
 
-    stroke_col, text_col = "black", "white"
-    draw_text_with_stroke(text_x + 25, text_y, name, font_large, 4)
+    def get_text_width(text, font):
+        try:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            return bbox[2] - bbox[0]
+        except Exception:
+            return len(text) * font.size * 0.6
+
+    name_font = font_large
+    max_text_width = new_banner_w - 80
+    
+    visible_name = "".join(char for char in name if not char.isspace())
+    
+    while get_text_width(visible_name, name_font) > max_text_width and name_font.size > 50:
+        name_font = load_unicode_font(name_font.size - 5)
+        
+    draw_text_with_stroke(text_x + 25, text_y, name, name_font, 4)
     draw_text_with_stroke(text_x + 25, text_y + 200, guild, font_small, 3)
 
-    if pin_img and pin_img.size != (100, 100):
+    if pin_img and pin_img.size != (130, 130) and pin_img.mode != 'RGBA' and pin_img.getbbox():
         pin_size = 130 
         pin_img = pin_img.resize((pin_size, pin_size), Image.LANCZOS)
         combined.paste(pin_img, (0, TARGET_HEIGHT - pin_size), pin_img)
@@ -161,35 +197,41 @@ async def get_banner(uid: str):
         raise HTTPException(status_code=400, detail="UID required")
 
     try:
+        print(f"Fetching profile for UID: {uid}")
         resp = await client.get(f"{INFO_API_URL}?uid={uid}")
         
         if resp.status_code != 200:
+            print(f"Info API returned status {resp.status_code}: {resp.text}")
             raise HTTPException(status_code=502, detail="Info API Error")
             
         data = resp.json()
-        acc = data.get("AccountInfo", data)
-        guild = data.get("GuildInfo", {})
         
-        if not acc: raise HTTPException(status_code=404, detail="Not Found")
+        if 'formatted_response' not in data or 'AccountInfo' not in data['formatted_response']:
+            print("AccountInfo not found in formatted_response.")
+            raise HTTPException(status_code=404, detail="Account info not found in API response.")
+
+        acc = data['formatted_response']['AccountInfo']
+        guild = data['formatted_response'].get('GuildInfo', {})
         
-        avatar_task = fetch_image_bytes(acc.get("AccountAvatarId") or acc.get("headPic"))
-        banner_task = fetch_image_bytes(acc.get("AccountBannerId") or acc.get("bannerId"))
-        
+        avatar_id = acc.get("AccountAvatarId") or acc.get("headPic")
+        banner_id = acc.get("AccountBannerId") or acc.get("bannerId")
         pin_id = acc.get("pinId") or acc.get("title")
-        pin_task = fetch_image_bytes(pin_id) if (pin_id and str(pin_id) != "0") else asyncio.sleep(0)
 
-        results = await asyncio.gather(avatar_task, banner_task, pin_task)
-        avatar_bytes, banner_bytes, pin_bytes = results[0], results[1], results[2]
+        print(f"Image IDs -> Avatar: {avatar_id}, Banner: {banner_id}, Pin: {pin_id}")
         
-        if pin_bytes is None: pin_bytes = b''
+        avatar_task = fetch_image_bytes(avatar_id)
+        banner_task = fetch_image_bytes(banner_id)
+        pin_task = fetch_image_bytes(pin_id) if (pin_id and str(pin_id) != "0") else asyncio.sleep(0, result=None)
 
-        loop = asyncio.get_event_loop()
+        avatar_bytes, banner_bytes, pin_bytes = await asyncio.gather(avatar_task, banner_task, pin_task)
+        
         banner_data = {
-            "AccountLevel": acc.get("AccountLevel") or acc.get("level"),
-            "AccountName": acc.get("AccountName") or acc.get("nickname"),
+            "AccountLevel": acc.get("AccountLevel") or acc.get("level") or "0",
+            "AccountName": acc.get("AccountName") or acc.get("nickname") or "Unknown",
             "GuildName": guild.get("GuildName") or guild.get("clanName") or ""
         }
         
+        loop = asyncio.get_event_loop()
         img_io = await loop.run_in_executor(
             process_pool, 
             process_banner_image, 
@@ -198,14 +240,14 @@ async def get_banner(uid: str):
         
         return Response(content=img_io.getvalue(), media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
 
+    except httpx.RequestError as e:
+        print(f"HTTP Request Error: {e}")
+        raise HTTPException(status_code=503, detail="Service Unavailable: Could not reach Info API.")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    await client.aclose()
-    process_pool.shutdown()
+# تم حذف app.on_event("shutdown") لأنه تم استبداله بـ lifespan
 
 if __name__ == '__main__':
     import uvicorn
