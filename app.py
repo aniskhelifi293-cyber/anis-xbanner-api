@@ -180,7 +180,9 @@ def process_banner_image(data, avatar_bytes, banner_bytes, pin_bytes):
     combined.save(img_io, 'PNG')
     img_io.seek(0)
     return img_io
-
+@app.route('/ping')
+def ping():
+    return jsonify({"status": "alive"}), 200
 @app.get("/")
 async def home():
     return {"message": "⚡ Ultra Fast Banner API Running",
